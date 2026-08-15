@@ -1087,7 +1087,13 @@ class GodotServer {
         this.activeProcess.process.kill();
       }
 
-      const cmdArgs = ['-d', '--path', args.projectPath];
+      // Reduce cross-instance contention when multiple teams/subagents run Godot at
+      // once: silence audio (avoid the shared audio device) and spread the window so
+      // concurrent instances don't perfectly overlap. Keep a real (non-headless)
+      // render so rendering bugs are still visible — headless uses the dummy renderer.
+      const px = 40 + Math.floor(Math.random() * 400);
+      const py = 40 + Math.floor(Math.random() * 200);
+      const cmdArgs = ['-d', '--path', args.projectPath, '--audio-driver', 'Dummy', '--position', `${px},${py}`];
       if (args.scene && this.validatePath(args.scene)) {
         this.logDebug(`Adding scene parameter: ${args.scene}`);
         cmdArgs.push(args.scene);
@@ -1155,14 +1161,27 @@ class GodotServer {
    * Handle the get_debug_output tool
    */
   private async handleGetDebugOutput() {
+    // Return GRACEFULLY (not an error) when there's no active process. An error
+    // tool_result here surfaces to the Agent SDK as `error_during_execution` and
+    // KILLS the whole session — especially under concurrency, when another run
+    // replaced/killed this one. A benign "no active process" is safe.
     if (!this.activeProcess) {
-      return this.createErrorResponse(
-        'No active Godot process.',
-        [
-          'Use run_project to start a Godot project first',
-          'Check if the Godot process crashed unexpectedly',
-        ]
-      );
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                output: [],
+                errors: [],
+                note: 'No active Godot process — it may have finished, been stopped, or been replaced by another run (concurrency). Use run_project to start one.',
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
     }
 
     return {
@@ -1186,14 +1205,11 @@ class GodotServer {
    * Handle the stop_project tool
    */
   private async handleStopProject() {
+    // Graceful (not an error) — see handleGetDebugOutput: an error here can kill the session.
     if (!this.activeProcess) {
-      return this.createErrorResponse(
-        'No active Godot process to stop.',
-        [
-          'Use run_project to start a Godot project first',
-          'The process may have already terminated',
-        ]
-      );
+      return {
+        content: [{ type: 'text', text: 'No active Godot process to stop (already stopped, exited, or replaced by another run).' }],
+      };
     }
 
     this.logDebug('Stopping active Godot process');

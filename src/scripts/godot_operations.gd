@@ -71,6 +71,14 @@ func _init():
             get_uid(params)
         "resave_resources":
             resave_resources(params)
+        "add_animation":
+            add_animation(params)
+        "add_collision_shape":
+            add_collision_shape(params)
+        "set_camera_limits":
+            set_camera_limits(params)
+        "connect_signal":
+            connect_signal(params)
         _:
             log_error("Unknown operation: " + operation)
             quit(1)
@@ -1184,3 +1192,189 @@ func save_scene(params):
             printerr("Failed to save scene: " + str(error))
     else:
         printerr("Failed to pack scene: " + str(result))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTHORING LAYER (Studio Leon) — drive Godot's real node systems headlessly, so
+# agents stop hand-rolling movement/animation on a bare canvas. Each op: load the
+# scene -> modify via the engine's own APIs -> pack -> save.
+# ─────────────────────────────────────────────────────────────────────────────
+
+func _authoring_load(params):
+    var full = params.scene_path
+    if not full.begins_with("res://"):
+        full = "res://" + full
+    var abs_path = ProjectSettings.globalize_path(full)
+    if not FileAccess.file_exists(abs_path):
+        printerr("Scene file does not exist at: " + abs_path)
+        quit(1)
+        return null
+    var scene = load(full)
+    if not scene:
+        printerr("Failed to load scene: " + full)
+        quit(1)
+        return null
+    return {"root": scene.instantiate(), "abs": abs_path}
+
+func _authoring_find(root, path):
+    if path == null or path == "" or path == "root":
+        return root
+    var p = str(path).replace("root/", "")
+    var n = root.get_node_or_null(p)
+    if n == null:
+        printerr("Node not found: " + str(path))
+    return n
+
+func _authoring_save(root, abs_path, msg):
+    var packed = PackedScene.new()
+    var result = packed.pack(root)
+    if result != OK:
+        printerr("Failed to pack scene: " + str(result))
+        quit(1)
+        return
+    var err = ResourceSaver.save(packed, abs_path)
+    if err != OK:
+        printerr("Failed to save scene: " + str(err))
+        quit(1)
+        return
+    print(msg)
+
+# Add an AnimationPlayer (if needed) + a value-track Animation built from keys.
+# params: scene_path, animation_name, player_parent?, player_path?, length?, loop?,
+#   tracks:[{path:"NodeName:property", keys:[{time,value}], interp?:"nearest"}]
+func add_animation(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var player = null
+    if params.has("player_path"):
+        player = _authoring_find(root, params.player_path)
+    var player_parent = _authoring_find(root, params.get("player_parent", "root"))
+    if player_parent == null:
+        quit(1)
+        return
+    if player == null:
+        player = player_parent.get_node_or_null("AnimationPlayer")
+    if player == null:
+        player = AnimationPlayer.new()
+        player.name = "AnimationPlayer"
+        player_parent.add_child(player)
+        player.owner = root
+    var anim = Animation.new()
+    anim.length = float(params.get("length", 1.0))
+    if bool(params.get("loop", true)):
+        anim.loop_mode = Animation.LOOP_LINEAR
+    else:
+        anim.loop_mode = Animation.LOOP_NONE
+    for track in params.get("tracks", []):
+        var ti = anim.add_track(Animation.TYPE_VALUE)
+        anim.track_set_path(ti, NodePath(track.path))
+        if track.get("interp", "") == "nearest":
+            anim.track_set_interpolation_type(ti, Animation.INTERPOLATION_NEAREST)
+        for key in track.get("keys", []):
+            anim.track_insert_key(ti, float(key.time), key.value)
+    var lib
+    if player.has_animation_library(""):
+        lib = player.get_animation_library("")
+    else:
+        lib = AnimationLibrary.new()
+        player.add_animation_library("", lib)
+    var an = params.get("animation_name", "anim")
+    if lib.has_animation(an):
+        lib.remove_animation(an)
+    lib.add_animation(an, anim)
+    _authoring_save(root, ctx.abs, "Animation '" + str(an) + "' added to " + str(player.name))
+
+# Add a CollisionShape2D with a real shape to a body — fixes floating / no-collision.
+# params: scene_path, parent_path (the body), shape:"rectangle"|"circle"|"capsule",
+#   size:[w,h] | radius | height, position?:[x,y], name?
+func add_collision_shape(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var parent = _authoring_find(root, params.get("parent_path", "root"))
+    if parent == null:
+        quit(1)
+        return
+    var cs = CollisionShape2D.new()
+    cs.name = params.get("name", "CollisionShape2D")
+    var kind = params.get("shape", "rectangle")
+    var shape
+    if kind == "circle":
+        shape = CircleShape2D.new()
+        shape.radius = float(params.get("radius", 16))
+    elif kind == "capsule":
+        shape = CapsuleShape2D.new()
+        shape.radius = float(params.get("radius", 12))
+        shape.height = float(params.get("height", 40))
+    else:
+        shape = RectangleShape2D.new()
+        var sz = params.get("size", [32, 32])
+        shape.size = Vector2(float(sz[0]), float(sz[1]))
+    cs.shape = shape
+    if params.has("position"):
+        var pos = params.position
+        cs.position = Vector2(float(pos[0]), float(pos[1]))
+    parent.add_child(cs)
+    cs.owner = root
+    _authoring_save(root, ctx.abs, "CollisionShape2D (" + str(kind) + ") added to " + str(parent.name))
+
+# Set Camera2D limits (clamp to the map), creating the camera if needed.
+# params: scene_path, camera_path? | camera_parent?, limits:{left,top,right,bottom}, smoothing?
+func set_camera_limits(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var cam = null
+    if params.has("camera_path"):
+        cam = _authoring_find(root, params.camera_path)
+    if cam == null:
+        var parent = _authoring_find(root, params.get("camera_parent", "root"))
+        if parent == null:
+            quit(1)
+            return
+        cam = parent.get_node_or_null("Camera2D")
+        if cam == null:
+            cam = Camera2D.new()
+            cam.name = "Camera2D"
+            parent.add_child(cam)
+            cam.owner = root
+    var lim = params.get("limits", {})
+    if lim.has("left"):
+        cam.limit_left = int(lim.left)
+    if lim.has("top"):
+        cam.limit_top = int(lim.top)
+    if lim.has("right"):
+        cam.limit_right = int(lim.right)
+    if lim.has("bottom"):
+        cam.limit_bottom = int(lim.bottom)
+    if params.has("smoothing"):
+        cam.position_smoothing_enabled = true
+        cam.position_smoothing_speed = float(params.smoothing)
+    _authoring_save(root, ctx.abs, "Camera2D limits set on " + str(cam.name))
+
+# Persistently connect a signal (serialized into the scene) — wire, don't hand-poll.
+# params: scene_path, from_path, signal, to_path, method
+func connect_signal(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var from_node = _authoring_find(root, params.from_path)
+    var to_node = _authoring_find(root, params.to_path)
+    if from_node == null or to_node == null:
+        quit(1)
+        return
+    var sig = params["signal"]
+    if not from_node.has_signal(sig):
+        printerr("Node has no signal: " + str(sig))
+        quit(1)
+        return
+    var err = from_node.connect(sig, Callable(to_node, params.method), CONNECT_PERSIST)
+    if err != OK:
+        printerr("Failed to connect signal: " + str(err))
+        quit(1)
+        return
+    _authoring_save(root, ctx.abs, "Connected " + str(from_node.name) + "." + str(sig) + " -> " + str(to_node.name) + "." + str(params.method))
