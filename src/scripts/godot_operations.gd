@@ -1485,7 +1485,11 @@ func paint_tilemap(params):
     layer.name = params.get("name", "TileMapLayer")
     layer.tile_set = ts
     for cell in params.get("cells", []):
-        layer.set_cell(Vector2i(int(cell.x), int(cell.y)), src_id, Vector2i(int(cell.atlas_x), int(cell.atlas_y)))
+        # tolerate both snake_case and camelCase for the atlas coords (array items
+        # aren't key-converted by the MCP layer)
+        var ax = cell.get("atlas_x", cell.get("atlasX", 0))
+        var ay = cell.get("atlas_y", cell.get("atlasY", 0))
+        layer.set_cell(Vector2i(int(cell.x), int(cell.y)), src_id, Vector2i(int(ax), int(ay)))
     parent.add_child(layer)
     layer.owner = root
     _authoring_save(root, ctx.abs, "TileMapLayer painted (" + str(params.get("cells", []).size()) + " cells)")

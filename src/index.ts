@@ -815,6 +815,153 @@ class GodotServer {
           },
         },
         {
+          name: 'add_animation',
+          description: 'Author an AnimationPlayer + a keyframed value-track Animation (walk/idle/attack). Use this instead of hand-rolling animation in _process.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+              scenePath: { type: 'string', description: 'Scene file (relative to project)' },
+              animationName: { type: 'string', description: 'Name of the animation (e.g. "walk")' },
+              playerParent: { type: 'string', description: 'Node to hold the AnimationPlayer (default "root")' },
+              length: { type: 'number', description: 'Animation length in seconds' },
+              loop: { type: 'boolean' },
+              tracks: { type: 'array', description: 'Value tracks: [{ path: "Node:property" e.g. ".:position:y", keys: [{time, value}], interp?: "nearest" }]' },
+            },
+            required: ['projectPath', 'scenePath', 'animationName'],
+          },
+        },
+        {
+          name: 'add_collision_shape',
+          description: 'Add a CollisionShape2D with a real shape to a body (CharacterBody2D/StaticBody2D/RigidBody2D). Fixes floating/no-collision characters.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              parentPath: { type: 'string', description: 'The body to attach the shape to' },
+              shape: { type: 'string', enum: ['rectangle', 'circle', 'capsule'] },
+              size: { type: 'array', description: '[w,h] for rectangle' },
+              radius: { type: 'number' },
+              height: { type: 'number' },
+              position: { type: 'array', description: '[x,y] offset' },
+              name: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath', 'parentPath'],
+          },
+        },
+        {
+          name: 'set_camera_limits',
+          description: 'Set Camera2D limits (clamp the view to the map so it never scrolls past the edge). Creates the Camera2D if absent.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              cameraPath: { type: 'string' },
+              cameraParent: { type: 'string', description: 'where to create the Camera2D if none (default root)' },
+              limits: { type: 'object', description: '{ left, top, right, bottom }' },
+              smoothing: { type: 'number', description: 'position smoothing speed (optional)' },
+            },
+            required: ['projectPath', 'scenePath'],
+          },
+        },
+        {
+          name: 'connect_signal',
+          description: 'Persistently connect a signal into the scene (serialized to the .tscn) — wire nodes, do not hand-poll.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              fromPath: { type: 'string', description: 'node emitting the signal' },
+              signal: { type: 'string' },
+              toPath: { type: 'string', description: 'node with the handler method' },
+              method: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath', 'fromPath', 'signal', 'toPath', 'method'],
+          },
+        },
+        {
+          name: 'add_animated_sprite',
+          description: 'Add an AnimatedSprite2D + SpriteFrames built from a sprite-sheet grid — real frame animation from an atlas.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              parentPath: { type: 'string' },
+              texture: { type: 'string', description: 'res:// path to the sprite sheet' },
+              frameWidth: { type: 'number' },
+              frameHeight: { type: 'number' },
+              animations: { type: 'array', description: '[{ name, frames: [frameIndex,...], fps?, loop? }]' },
+              autoplay: { type: 'string' },
+              name: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath', 'parentPath', 'texture'],
+          },
+        },
+        {
+          name: 'paint_tilemap',
+          description: 'Add a TileMapLayer with a TileSet built from an atlas texture, and paint cells. Use for levels instead of hand-placing sprites.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              parentPath: { type: 'string' },
+              texture: { type: 'string', description: 'res:// path to the tileset atlas' },
+              tileSize: { type: 'number' },
+              cells: { type: 'array', description: '[{ x, y, atlasX, atlasY }]' },
+              name: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath', 'parentPath', 'texture'],
+          },
+        },
+        {
+          name: 'add_area2d',
+          description: 'Add an Area2D + nested CollisionShape2D — hitboxes, hurtboxes, triggers, pickups (with collision layer/mask).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              parentPath: { type: 'string' },
+              shape: { type: 'string', enum: ['rectangle', 'circle', 'capsule'] },
+              size: { type: 'array' },
+              radius: { type: 'number' },
+              height: { type: 'number' },
+              position: { type: 'array' },
+              collisionLayer: { type: 'number' },
+              collisionMask: { type: 'number' },
+              name: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath', 'parentPath'],
+          },
+        },
+        {
+          name: 'add_particles',
+          description: 'Add a GPUParticles2D + ParticleProcessMaterial — cheap juice (bursts, trails, dust).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              parentPath: { type: 'string' },
+              amount: { type: 'number' },
+              lifetime: { type: 'number' },
+              texture: { type: 'string' },
+              gravity: { type: 'number' },
+              spread: { type: 'number' },
+              velocity: { type: 'number' },
+              oneShot: { type: 'boolean' },
+              explosiveness: { type: 'number' },
+              name: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath', 'parentPath'],
+          },
+        },
+        {
           name: 'load_sprite',
           description: 'Load a sprite into a Sprite2D node',
           inputSchema: {
@@ -948,6 +1095,22 @@ class GodotServer {
           return await this.handleCreateScene(request.params.arguments);
         case 'add_node':
           return await this.handleAddNode(request.params.arguments);
+        case 'add_animation':
+          return await this.handleAuthoringOp('add_animation', request.params.arguments, ['animationName']);
+        case 'add_collision_shape':
+          return await this.handleAuthoringOp('add_collision_shape', request.params.arguments, ['parentPath']);
+        case 'set_camera_limits':
+          return await this.handleAuthoringOp('set_camera_limits', request.params.arguments, []);
+        case 'connect_signal':
+          return await this.handleAuthoringOp('connect_signal', request.params.arguments, ['fromPath', 'signal', 'toPath', 'method']);
+        case 'add_animated_sprite':
+          return await this.handleAuthoringOp('add_animated_sprite', request.params.arguments, ['parentPath', 'texture']);
+        case 'paint_tilemap':
+          return await this.handleAuthoringOp('paint_tilemap', request.params.arguments, ['parentPath', 'texture']);
+        case 'add_area2d':
+          return await this.handleAuthoringOp('add_area2d', request.params.arguments, ['parentPath']);
+        case 'add_particles':
+          return await this.handleAuthoringOp('add_particles', request.params.arguments, ['parentPath']);
         case 'load_sprite':
           return await this.handleLoadSprite(request.params.arguments);
         case 'export_mesh_library':
@@ -1577,6 +1740,50 @@ class GodotServer {
   /**
    * Handle the add_node tool
    */
+  // Generic handler for the headless AUTHORING-LAYER ops (animation, collision,
+  // camera limits, signals, animated sprites, tilemaps, areas, particles). Each
+  // validates the project + scene, then drives godot_operations.gd via executeOperation.
+  private async handleAuthoringOp(operation: string, args: any, required: string[]) {
+    args = this.normalizeParameters(args);
+    const need = ['projectPath', 'scenePath', ...required];
+    for (const key of need) {
+      if (args[key] === undefined || args[key] === null || args[key] === '') {
+        return this.createErrorResponse(`Missing required parameter: ${key}`, [
+          `Provide: ${need.join(', ')}`,
+        ]);
+      }
+    }
+    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+      return this.createErrorResponse('Invalid path', [
+        'Provide valid paths without ".." or other unsafe characters',
+      ]);
+    }
+    if (!existsSync(join(args.projectPath, 'project.godot'))) {
+      return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        'The path must contain a project.godot file',
+      ]);
+    }
+    if (!existsSync(join(args.projectPath, args.scenePath))) {
+      return this.createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
+        'Create it with create_scene first',
+      ]);
+    }
+    const params: any = { ...args };
+    delete params.projectPath;
+    try {
+      const { stdout, stderr } = await this.executeOperation(operation, params, args.projectPath);
+      if (stderr && /Failed to|not found|does not exist|has no signal/.test(stderr)) {
+        return this.createErrorResponse(`${operation} failed: ${stderr.trim().slice(-400)}`, [
+          'Check the node paths (parentPath/fromPath/toPath) exist in the scene',
+          'Verify any referenced texture path is a res:// resource',
+        ]);
+      }
+      return { content: [{ type: 'text', text: `${operation} completed.\n${stdout}`.trim() }] };
+    } catch (e: any) {
+      return this.createErrorResponse(`${operation} error: ${e?.message ?? String(e)}`, []);
+    }
+  }
+
   private async handleAddNode(args: any) {
     // Normalize parameters to camelCase
     args = this.normalizeParameters(args);
