@@ -79,6 +79,14 @@ func _init():
             set_camera_limits(params)
         "connect_signal":
             connect_signal(params)
+        "add_animated_sprite":
+            add_animated_sprite(params)
+        "paint_tilemap":
+            paint_tilemap(params)
+        "add_area2d":
+            add_area2d(params)
+        "add_particles":
+            add_particles(params)
         _:
             log_error("Unknown operation: " + operation)
             quit(1)
@@ -1378,3 +1386,171 @@ func connect_signal(params):
         quit(1)
         return
     _authoring_save(root, ctx.abs, "Connected " + str(from_node.name) + "." + str(sig) + " -> " + str(to_node.name) + "." + str(params.method))
+
+# ── AUTHORING LAYER batch 2 — animated sprites, tilemaps, areas, particles ──────
+
+func _make_shape(params):
+    var kind = params.get("shape", "rectangle")
+    var shape
+    if kind == "circle":
+        shape = CircleShape2D.new()
+        shape.radius = float(params.get("radius", 16))
+    elif kind == "capsule":
+        shape = CapsuleShape2D.new()
+        shape.radius = float(params.get("radius", 12))
+        shape.height = float(params.get("height", 40))
+    else:
+        shape = RectangleShape2D.new()
+        var sz = params.get("size", [32, 32])
+        shape.size = Vector2(float(sz[0]), float(sz[1]))
+    return shape
+
+# AnimatedSprite2D + SpriteFrames built from a sprite sheet (grid of frames).
+# params: scene_path, parent_path, name?, texture (res:// sheet), frame_width, frame_height,
+#   animations:[{name, frames:[frame_index,...], fps?, loop?}], autoplay?
+func add_animated_sprite(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var parent = _authoring_find(root, params.get("parent_path", "root"))
+    if parent == null:
+        quit(1)
+        return
+    var tex = load(params.texture)
+    if tex == null:
+        printerr("Texture not found: " + str(params.texture))
+        quit(1)
+        return
+    var fw = int(params.get("frame_width", 16))
+    var fh = int(params.get("frame_height", 16))
+    var cols = int(tex.get_width() / fw)
+    if cols < 1:
+        cols = 1
+    var sf = SpriteFrames.new()
+    if sf.has_animation("default"):
+        sf.remove_animation("default")
+    for a in params.get("animations", []):
+        var aname = a.name
+        if not sf.has_animation(aname):
+            sf.add_animation(aname)
+        sf.set_animation_speed(aname, float(a.get("fps", 8)))
+        sf.set_animation_loop(aname, bool(a.get("loop", true)))
+        for idx in a.get("frames", []):
+            var at = AtlasTexture.new()
+            at.atlas = tex
+            var fx = (int(idx) % cols) * fw
+            var fy = int(int(idx) / cols) * fh
+            at.region = Rect2(fx, fy, fw, fh)
+            sf.add_frame(aname, at)
+    var spr = AnimatedSprite2D.new()
+    spr.name = params.get("name", "AnimatedSprite2D")
+    spr.sprite_frames = sf
+    if params.has("autoplay"):
+        spr.autoplay = params.autoplay
+    parent.add_child(spr)
+    spr.owner = root
+    _authoring_save(root, ctx.abs, "AnimatedSprite2D added to " + str(parent.name))
+
+# A TileMapLayer with a TileSet built from an atlas texture, then painted cells.
+# params: scene_path, parent_path, name?, texture (res:// atlas), tile_size,
+#   cells:[{x,y,atlas_x,atlas_y}]
+func paint_tilemap(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var parent = _authoring_find(root, params.get("parent_path", "root"))
+    if parent == null:
+        quit(1)
+        return
+    var tex = load(params.texture)
+    if tex == null:
+        printerr("Texture not found: " + str(params.texture))
+        quit(1)
+        return
+    var tile = int(params.get("tile_size", 16))
+    var ts = TileSet.new()
+    ts.tile_size = Vector2i(tile, tile)
+    var src = TileSetAtlasSource.new()
+    src.texture = tex
+    src.texture_region_size = Vector2i(tile, tile)
+    var cols = int(tex.get_width() / tile)
+    var rows = int(tex.get_height() / tile)
+    for ty in rows:
+        for tx in cols:
+            src.create_tile(Vector2i(tx, ty))
+    var src_id = ts.add_source(src)
+    var layer = TileMapLayer.new()
+    layer.name = params.get("name", "TileMapLayer")
+    layer.tile_set = ts
+    for cell in params.get("cells", []):
+        layer.set_cell(Vector2i(int(cell.x), int(cell.y)), src_id, Vector2i(int(cell.atlas_x), int(cell.atlas_y)))
+    parent.add_child(layer)
+    layer.owner = root
+    _authoring_save(root, ctx.abs, "TileMapLayer painted (" + str(params.get("cells", []).size()) + " cells)")
+
+# An Area2D + CollisionShape2D — hitboxes/hurtboxes/triggers/pickups.
+# params: scene_path, parent_path, name?, shape/size/radius/height, position?,
+#   collision_layer?, collision_mask?
+func add_area2d(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var parent = _authoring_find(root, params.get("parent_path", "root"))
+    if parent == null:
+        quit(1)
+        return
+    var area = Area2D.new()
+    area.name = params.get("name", "Area2D")
+    if params.has("collision_layer"):
+        area.collision_layer = int(params.collision_layer)
+    if params.has("collision_mask"):
+        area.collision_mask = int(params.collision_mask)
+    var cs = CollisionShape2D.new()
+    cs.shape = _make_shape(params)
+    if params.has("position"):
+        var pos = params.position
+        cs.position = Vector2(float(pos[0]), float(pos[1]))
+    parent.add_child(area)
+    area.owner = root
+    area.add_child(cs)
+    cs.owner = root
+    _authoring_save(root, ctx.abs, "Area2D added to " + str(parent.name))
+
+# GPUParticles2D + ParticleProcessMaterial — cheap juice (bursts, trails, dust).
+# params: scene_path, parent_path, name?, amount?, lifetime?, texture?, gravity?,
+#   spread?, velocity?, one_shot?, explosiveness?
+func add_particles(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var parent = _authoring_find(root, params.get("parent_path", "root"))
+    if parent == null:
+        quit(1)
+        return
+    var p = GPUParticles2D.new()
+    p.name = params.get("name", "GPUParticles2D")
+    p.amount = int(params.get("amount", 16))
+    p.lifetime = float(params.get("lifetime", 1.0))
+    if params.has("one_shot"):
+        p.one_shot = bool(params.one_shot)
+    if params.has("explosiveness"):
+        p.explosiveness = float(params.explosiveness)
+    if params.has("texture"):
+        var tex = load(params.texture)
+        if tex != null:
+            p.texture = tex
+    var mat = ParticleProcessMaterial.new()
+    mat.gravity = Vector3(0, float(params.get("gravity", 98)), 0)
+    if params.has("spread"):
+        mat.spread = float(params.spread)
+    if params.has("velocity"):
+        mat.initial_velocity_min = float(params.velocity)
+        mat.initial_velocity_max = float(params.velocity)
+    p.process_material = mat
+    parent.add_child(p)
+    p.owner = root
+    _authoring_save(root, ctx.abs, "GPUParticles2D added to " + str(parent.name))
