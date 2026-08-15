@@ -87,6 +87,20 @@ func _init():
             add_area2d(params)
         "add_particles":
             add_particles(params)
+        "attach_script":
+            attach_script(params)
+        "set_node_property":
+            set_node_property(params)
+        "remove_node":
+            remove_node(params)
+        "instance_scene":
+            instance_scene(params)
+        "get_scene_tree":
+            get_scene_tree(params)
+        "add_input_action":
+            add_input_action(params)
+        "set_project_setting":
+            set_project_setting(params)
         _:
             log_error("Unknown operation: " + operation)
             quit(1)
@@ -1558,3 +1572,166 @@ func add_particles(params):
     parent.add_child(p)
     p.owner = root
     _authoring_save(root, ctx.abs, "GPUParticles2D added to " + str(parent.name))
+
+# ── AUTHORING LAYER batch 3 — behavior, input, project config, composition, edit ─
+
+# Attach an existing GDScript (write the .gd first) to a node in the scene.
+# params: scene_path, node_path, script_path (res://...)
+func attach_script(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var node = _authoring_find(root, params.node_path)
+    if node == null:
+        quit(1)
+        return
+    var sp = params.script_path
+    if not sp.begins_with("res://"):
+        sp = "res://" + sp
+    var scr = load(sp)
+    if scr == null:
+        printerr("Script not found: " + str(sp))
+        quit(1)
+        return
+    node.set_script(scr)
+    _authoring_save(root, ctx.abs, "Script " + str(sp) + " attached to " + str(node.name))
+
+# Set properties on an EXISTING node (add_node sets them at creation; use this to tweak).
+# params: scene_path, node_path, properties:{...}   (res:// values are loaded)
+func set_node_property(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var node = _authoring_find(root, params.node_path)
+    if node == null:
+        quit(1)
+        return
+    for property in params.get("properties", {}):
+        var value = params.properties[property]
+        if typeof(value) == TYPE_STRING and value.begins_with("res://"):
+            value = load(value)
+        node.set(property, value)
+    _authoring_save(root, ctx.abs, "Properties set on " + str(node.name))
+
+# Remove a node from the scene.
+# params: scene_path, node_path
+func remove_node(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var node = _authoring_find(root, params.node_path)
+    if node == null:
+        quit(1)
+        return
+    if node == root:
+        printerr("Cannot remove the scene root")
+        quit(1)
+        return
+    var parent = node.get_parent()
+    parent.remove_child(node)
+    node.free()
+    _authoring_save(root, ctx.abs, "Removed node " + str(params.node_path))
+
+# Instance a sub-scene (a PackedScene / prefab) as a child — the Godot way to compose.
+# params: scene_path, sub_scene (res:// .tscn), parent_path?, name?, position?:[x,y]
+func instance_scene(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    var root = ctx.root
+    var parent = _authoring_find(root, params.get("parent_path", "root"))
+    if parent == null:
+        quit(1)
+        return
+    var sub = params.sub_scene
+    if not sub.begins_with("res://"):
+        sub = "res://" + sub
+    var packed = load(sub)
+    if packed == null:
+        printerr("Sub-scene not found: " + str(sub))
+        quit(1)
+        return
+    var inst = packed.instantiate()
+    if params.has("name"):
+        inst.name = params.name
+    if params.has("position") and inst is Node2D:
+        var pos = params.position
+        inst.position = Vector2(float(pos[0]), float(pos[1]))
+    parent.add_child(inst)
+    inst.owner = root
+    _authoring_save(root, ctx.abs, "Instanced " + str(sub) + " under " + str(parent.name))
+
+# Print the scene tree (name : type per node) to stdout — inspection for the agent.
+# params: scene_path
+func get_scene_tree(params):
+    var ctx = _authoring_load(params)
+    if ctx == null:
+        return
+    _print_tree(ctx.root, 0)
+    print("SCENE TREE OK")
+
+func _print_tree(node, depth):
+    var pad = ""
+    for i in depth:
+        pad += "  "
+    var scr = ""
+    if node.get_script() != null:
+        scr = " [script]"
+    print(pad + str(node.name) + " : " + node.get_class() + scr)
+    for child in node.get_children():
+        _print_tree(child, depth + 1)
+
+# ── PROJECT-LEVEL ops (operate on project.godot, no scene) ──────────────────────
+
+# Define an InputMap action (so Input.is_action_pressed works — the missing-binding fix).
+# params: action, deadzone?, events:[{type:"key"|"joy_button"|"mouse_button", key?:"X", button?:0}]
+func add_input_action(params):
+    var action = "input/" + str(params.action)
+    var events = []
+    for e in params.get("events", []):
+        var t = e.get("type", "key")
+        if t == "key":
+            var ev = InputEventKey.new()
+            var code = OS.find_keycode_from_string(str(e.get("key", "")))
+            ev.physical_keycode = code
+            ev.keycode = code
+            events.append(ev)
+        elif t == "joy_button":
+            var jb = InputEventJoypadButton.new()
+            jb.button_index = int(e.get("button", 0))
+            events.append(jb)
+        elif t == "mouse_button":
+            var mb = InputEventMouseButton.new()
+            mb.button_index = int(e.get("button", 1))
+            events.append(mb)
+    var entry = {"deadzone": float(params.get("deadzone", 0.5)), "events": events}
+    ProjectSettings.set_setting(action, entry)
+    var err = ProjectSettings.save()
+    if err != OK:
+        printerr("Failed to save project settings: " + str(err))
+        quit(1)
+        return
+    print("Input action '" + str(params.action) + "' defined with " + str(events.size()) + " event(s)")
+
+# Set arbitrary project settings (main scene, window size, stretch, physics tick...).
+# params: settings:{ "application/run/main_scene":"res://main.tscn",
+#   "display/window/size/viewport_width":1280, "display/window/stretch/mode":"canvas_items", ... }
+func set_project_setting(params):
+    var settings = params.get("settings", {})
+    var count = 0
+    for key in settings:
+        var value = settings[key]
+        # main_scene wants a res:// path string
+        if typeof(value) == TYPE_STRING and (key as String).ends_with("main_scene") and not value.begins_with("res://"):
+            value = "res://" + value
+        ProjectSettings.set_setting(key, value)
+        count += 1
+    var err = ProjectSettings.save()
+    if err != OK:
+        printerr("Failed to save project settings: " + str(err))
+        quit(1)
+        return
+    print("Set " + str(count) + " project setting(s)")

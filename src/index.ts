@@ -962,6 +962,101 @@ class GodotServer {
           },
         },
         {
+          name: 'attach_script',
+          description: 'Attach an existing GDScript (write the .gd first) to a node — this is where game behavior lives.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              nodePath: { type: 'string', description: 'e.g. "root" or "root/Player"' },
+              scriptPath: { type: 'string', description: 'res:// path to the .gd file' },
+            },
+            required: ['projectPath', 'scenePath', 'nodePath', 'scriptPath'],
+          },
+        },
+        {
+          name: 'set_node_property',
+          description: 'Set properties on an existing node (res:// values are loaded as resources).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              nodePath: { type: 'string' },
+              properties: { type: 'object' },
+            },
+            required: ['projectPath', 'scenePath', 'nodePath', 'properties'],
+          },
+        },
+        {
+          name: 'remove_node',
+          description: 'Remove a node from a scene.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+              nodePath: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath', 'nodePath'],
+          },
+        },
+        {
+          name: 'instance_scene',
+          description: 'Instance a sub-scene (a PackedScene / prefab .tscn) as a child — the Godot way to compose (e.g. drop a Player prefab into a Level).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string', description: 'the parent scene to add into' },
+              subScene: { type: 'string', description: 'res:// path to the .tscn to instance' },
+              parentPath: { type: 'string' },
+              name: { type: 'string' },
+              position: { type: 'array', description: '[x,y]' },
+            },
+            required: ['projectPath', 'scenePath', 'subScene'],
+          },
+        },
+        {
+          name: 'get_scene_tree',
+          description: 'Print a scene\'s node tree (name : type, + [script] markers) — inspect what exists before editing.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              scenePath: { type: 'string' },
+            },
+            required: ['projectPath', 'scenePath'],
+          },
+        },
+        {
+          name: 'add_input_action',
+          description: 'Define an InputMap action in project.godot (so Input.is_action_pressed works). Fixes the "verb bound to nothing" bug — declare move/jump/attack here.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              action: { type: 'string', description: 'action name, e.g. "jump"' },
+              events: { type: 'array', description: '[{type:"key", key:"Z"} | {type:"joy_button", button:0} | {type:"mouse_button", button:1}]' },
+              deadzone: { type: 'number' },
+            },
+            required: ['projectPath', 'action'],
+          },
+        },
+        {
+          name: 'set_project_setting',
+          description: 'Set project.godot settings — main scene (application/run/main_scene), window size, stretch mode, physics tick, etc. Run this so the game actually launches at a modern resolution.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              settings: { type: 'object', description: '{ "application/run/main_scene":"res://main.tscn", "display/window/size/viewport_width":1280, ... }' },
+            },
+            required: ['projectPath', 'settings'],
+          },
+        },
+        {
           name: 'load_sprite',
           description: 'Load a sprite into a Sprite2D node',
           inputSchema: {
@@ -1111,6 +1206,20 @@ class GodotServer {
           return await this.handleAuthoringOp('add_area2d', request.params.arguments, ['parentPath']);
         case 'add_particles':
           return await this.handleAuthoringOp('add_particles', request.params.arguments, ['parentPath']);
+        case 'attach_script':
+          return await this.handleAuthoringOp('attach_script', request.params.arguments, ['nodePath', 'scriptPath']);
+        case 'set_node_property':
+          return await this.handleAuthoringOp('set_node_property', request.params.arguments, ['nodePath', 'properties']);
+        case 'remove_node':
+          return await this.handleAuthoringOp('remove_node', request.params.arguments, ['nodePath']);
+        case 'instance_scene':
+          return await this.handleAuthoringOp('instance_scene', request.params.arguments, ['subScene']);
+        case 'get_scene_tree':
+          return await this.handleAuthoringOp('get_scene_tree', request.params.arguments, []);
+        case 'add_input_action':
+          return await this.handleAuthoringOp('add_input_action', request.params.arguments, ['action'], false);
+        case 'set_project_setting':
+          return await this.handleAuthoringOp('set_project_setting', request.params.arguments, ['settings'], false);
         case 'load_sprite':
           return await this.handleLoadSprite(request.params.arguments);
         case 'export_mesh_library':
@@ -1743,9 +1852,9 @@ class GodotServer {
   // Generic handler for the headless AUTHORING-LAYER ops (animation, collision,
   // camera limits, signals, animated sprites, tilemaps, areas, particles). Each
   // validates the project + scene, then drives godot_operations.gd via executeOperation.
-  private async handleAuthoringOp(operation: string, args: any, required: string[]) {
+  private async handleAuthoringOp(operation: string, args: any, required: string[], needsScene = true) {
     args = this.normalizeParameters(args);
-    const need = ['projectPath', 'scenePath', ...required];
+    const need = ['projectPath', ...(needsScene ? ['scenePath'] : []), ...required];
     for (const key of need) {
       if (args[key] === undefined || args[key] === null || args[key] === '') {
         return this.createErrorResponse(`Missing required parameter: ${key}`, [
@@ -1753,7 +1862,7 @@ class GodotServer {
         ]);
       }
     }
-    if (!this.validatePath(args.projectPath) || !this.validatePath(args.scenePath)) {
+    if (!this.validatePath(args.projectPath) || (needsScene && !this.validatePath(args.scenePath))) {
       return this.createErrorResponse('Invalid path', [
         'Provide valid paths without ".." or other unsafe characters',
       ]);
@@ -1763,7 +1872,7 @@ class GodotServer {
         'The path must contain a project.godot file',
       ]);
     }
-    if (!existsSync(join(args.projectPath, args.scenePath))) {
+    if (needsScene && !existsSync(join(args.projectPath, args.scenePath))) {
       return this.createErrorResponse(`Scene file does not exist: ${args.scenePath}`, [
         'Create it with create_scene first',
       ]);
