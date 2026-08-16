@@ -818,6 +818,28 @@ func _bounds(root: Node) -> Rect2:
           },
         },
         {
+          name: 'batch_author',
+          description:
+            "Apply an ORDERED list of authoring ops against ONE scene in a SINGLE Godot boot (instead of one boot per op) — the fast path for authoring a whole scene. The scene is loaded once and saved once; if any op fails, the process aborts BEFORE saving so the .tscn is left unchanged (no partial writes). Each ops[] entry is { op: <tool name>, ...that tool's params } (e.g. {op:'add_collision_shape', parentPath:'Player', shape:'rectangle', size:{x:16,y:24}}). Use it for the scene-authoring ops (add_node, add_collision_shape, add_animation, add_animated_sprite, paint_tilemap, add_area2d, set_camera_limits, add_particles, connect_signal, attach_script, set_node_property, instance_scene, remove_node).",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+              scenePath: { type: 'string', description: 'The .tscn all ops target (res:// or project-relative). Loaded once, saved once.' },
+              ops: {
+                type: 'array',
+                description: "Ordered ops. Each is an object: { op: '<tool name>', ...that op's params }. Applied in order against the one loaded scene.",
+                items: {
+                  type: 'object',
+                  properties: { op: { type: 'string', description: 'The authoring op name, e.g. "add_collision_shape"' } },
+                  required: ['op'],
+                },
+              },
+            },
+            required: ['projectPath', 'scenePath', 'ops'],
+          },
+        },
+        {
           name: 'capture_level_overview',
           description:
             "Render a whole-LEVEL overview PNG of a scene — the top-down \"level-designer's view\" of the entire level (all tilemaps/sprites framed to fit), NOT the in-game camera. Computes the level's world bounds (Camera2D limits if authored, else the union of TileMapLayer/Sprite2D extents), frames an orthographic camera to fit, and captures one real (non-headless) rendered frame. Use it to eyeball level layout, coverage, and composition the way you would in the Godot editor.",
@@ -1339,6 +1361,8 @@ func _bounds(root: Node) -> Rect2:
           return await this.handleAuthoringOp('add_animated_sprite', request.params.arguments, ['parentPath', 'texture']);
         case 'paint_tilemap':
           return await this.handleAuthoringOp('paint_tilemap', request.params.arguments, ['parentPath', 'texture']);
+        case 'batch_author':
+          return await this.handleAuthoringOp('batch_author', request.params.arguments, ['ops']);
         case 'add_area2d':
           return await this.handleAuthoringOp('add_area2d', request.params.arguments, ['parentPath']);
         case 'add_particles':

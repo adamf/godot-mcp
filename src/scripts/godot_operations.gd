@@ -4,6 +4,12 @@ extends SceneTree
 # Debug mode flag
 var debug_mode = false
 
+# batch_author state — when active, the authoring ops share ONE loaded scene and defer
+# the save, so N ops cost ONE Godot boot instead of N. See batch_author() + _dispatch().
+var _batch_active = false
+var _batch_root = null
+var _batch_abs = ""
+
 func _init():
     var args = OS.get_cmdline_args()
     
@@ -55,8 +61,17 @@ func _init():
         quit(1)
     
     log_info("Executing operation: " + operation)
-    
+
+    _dispatch(operation, params)
+
+    quit()
+
+# Route an operation name to its handler. Factored out of _init so batch_author can
+# replay the same handlers against one shared, already-loaded scene.
+func _dispatch(operation, params):
     match operation:
+        "batch_author":
+            batch_author(params)
         "create_scene":
             create_scene(params)
         "add_node":
@@ -104,8 +119,6 @@ func _init():
         _:
             log_error("Unknown operation: " + operation)
             quit(1)
-    
-    quit()
 
 # Logging functions
 func log_debug(message):
@@ -1221,7 +1234,107 @@ func save_scene(params):
 # scene -> modify via the engine's own APIs -> pack -> save.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Apply an ORDERED list of authoring ops against ONE scene loaded ONCE, saving ONCE at the
+# end — so a scene authored with K ops costs a single Godot boot, not K. On any op's internal
+# failure the op quits the process before the final save, so the .tscn on disk is left
+# unchanged (no partial writes). params: { scene_path, ops:[{op, ...opParams}] }.
+func batch_author(params):
+    if not params.has("scene_path"):
+        printerr("batch_author requires scene_path")
+        quit(1)
+        return
+    var full = str(params.scene_path)
+    if not full.begins_with("res://"):
+        full = "res://" + full
+    var abs_path = ProjectSettings.globalize_path(full)
+    if not FileAccess.file_exists(abs_path):
+        printerr("Scene file does not exist at: " + abs_path)
+        quit(1)
+        return
+    var scene = load(full)
+    if not scene:
+        printerr("Failed to load scene: " + full)
+        quit(1)
+        return
+    var ops = params.get("ops", [])
+    if not (ops is Array) or ops.size() == 0:
+        printerr("batch_author requires a non-empty 'ops' array")
+        quit(1)
+        return
+
+    _batch_root = scene.instantiate()
+    _batch_abs = abs_path
+    _batch_active = true
+
+    var applied = 0
+    for i in range(ops.size()):
+        var raw = ops[i]
+        if not (raw is Dictionary) or not raw.has("op"):
+            _batch_active = false
+            printerr("batch_author: op #" + str(i) + " must be an object with an 'op' field")
+            quit(1)
+            return
+        # The TS camel->snake converter doesn't recurse into arrays, so batched op entries
+        # arrive camelCase — normalize each entry's keys here so the handlers find them.
+        var entry = _snakeify(raw)
+        var op_name = str(entry.op)
+        if op_name == "batch_author":
+            _batch_active = false
+            printerr("batch_author cannot be nested")
+            quit(1)
+            return
+        log_info("[batch] op " + str(i + 1) + "/" + str(ops.size()) + ": " + op_name)
+        # A failing handler calls quit() itself -> process ends before the save below,
+        # leaving the scene file untouched.
+        _dispatch(op_name, entry)
+        applied += 1
+
+    # All ops applied against the in-memory tree — pack + save exactly once.
+    _batch_active = false
+    var packed = PackedScene.new()
+    var result = packed.pack(_batch_root)
+    if result != OK:
+        printerr("batch_author: failed to pack scene: " + str(result))
+        quit(1)
+        return
+    var err = ResourceSaver.save(packed, _batch_abs)
+    if err != OK:
+        printerr("batch_author: failed to save scene: " + str(err))
+        quit(1)
+        return
+    print("batch_author applied " + str(applied) + " op(s) to " + str(params.scene_path))
+
+# Recursively convert Dictionary keys from camelCase to snake_case (and descend into
+# nested arrays/dicts), so batched op params match what the handlers read.
+func _snakeify(v):
+    if v is Dictionary:
+        var out = {}
+        for k in v.keys():
+            out[_to_snake(str(k))] = _snakeify(v[k])
+        return out
+    elif v is Array:
+        var arr = []
+        for e in v:
+            arr.append(_snakeify(e))
+        return arr
+    return v
+
+func _to_snake(s):
+    var r = ""
+    for i in range(s.length()):
+        var c = s[i]
+        if c >= "A" and c <= "Z":
+            if i > 0:
+                r += "_"
+            r += c.to_lower()
+        else:
+            r += c
+    return r
+
 func _authoring_load(params):
+    # In a batch, every op shares the ONE scene loaded by batch_author — don't reload.
+    if _batch_active:
+        return {"root": _batch_root, "abs": _batch_abs}
     var full = params.scene_path
     if not full.begins_with("res://"):
         full = "res://" + full
@@ -1247,6 +1360,11 @@ func _authoring_find(root, path):
     return n
 
 func _authoring_save(root, abs_path, msg):
+    # In a batch, defer the real save — batch_author packs + saves ONCE at the end, so a
+    # mid-batch failure (which quits) leaves the .tscn on disk untouched. Just log progress.
+    if _batch_active:
+        print("[batch] " + msg)
+        return
     var packed = PackedScene.new()
     var result = packed.pack(root)
     if result != OK:
