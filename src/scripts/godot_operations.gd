@@ -1546,8 +1546,7 @@ func add_collision_shape(params):
         shape.height = float(params.get("height", 40))
     else:
         shape = RectangleShape2D.new()
-        var sz = params.get("size", [32, 32])
-        shape.size = Vector2(float(sz[0]), float(sz[1]))
+        shape.size = _to_size(params.get("size", null))
     cs.shape = shape
     if params.has("position"):
         var pos = params.position
@@ -1617,6 +1616,21 @@ func connect_signal(params):
 
 # ── AUTHORING LAYER batch 2 — animated sprites, tilemaps, areas, particles ──────
 
+# Robustly read a 2D size from agent-supplied params. Callers pass it as a dict {x,y}
+# (or {w,h}), an array [w,h], a single number (square), or omit it (default). The old code
+# assumed an array and crashed on the dict form ("Invalid access to key '0'").
+func _to_size(v, def_w := 32.0, def_h := 32.0) -> Vector2:
+    if v is Dictionary:
+        return Vector2(float(v.get("x", v.get("w", def_w))), float(v.get("y", v.get("h", def_h))))
+    if v is Array:
+        if v.size() >= 2:
+            return Vector2(float(v[0]), float(v[1]))
+        if v.size() == 1:
+            return Vector2(float(v[0]), float(v[0]))
+    if v is float or v is int:
+        return Vector2(float(v), float(v))
+    return Vector2(def_w, def_h)
+
 func _make_shape(params):
     var kind = params.get("shape", "rectangle")
     var shape
@@ -1629,8 +1643,7 @@ func _make_shape(params):
         shape.height = float(params.get("height", 40))
     else:
         shape = RectangleShape2D.new()
-        var sz = params.get("size", [32, 32])
-        shape.size = Vector2(float(sz[0]), float(sz[1]))
+        shape.size = _to_size(params.get("size", null))
     return shape
 
 # AnimatedSprite2D + SpriteFrames built from a sprite sheet (grid of frames).
