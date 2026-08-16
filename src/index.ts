@@ -8,6 +8,7 @@
  */
 
 import { fileURLToPath } from 'url';
+import { GodotOpServer } from './godotOpServer.js';
 import { join, dirname, basename, normalize, isAbsolute } from 'path';
 import { existsSync, readdirSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { spawn, execFile } from 'child_process';
@@ -65,6 +66,8 @@ class GodotServer {
   private server: Server;
   private activeProcess: GodotProcess | null = null;
   private godotPath: string | null = null;
+  /** Warm resident-process pool for authoring ops (opt-in via GODOT_RESIDENT=1). */
+  private opServer: GodotOpServer | null = null;
 
   /**
    * GDScript template for capture_level_overview. Tokens (__TARGET__, __OUT__,
@@ -252,6 +255,18 @@ func _bounds(root: Node) -> Rect2:
     // Set the path to the operations script
     this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
     if (debugMode) console.error(`[DEBUG] Operations script path: ${this.operationsScriptPath}`);
+
+    // Warm resident pool for authoring ops — opt-in (GODOT_RESIDENT=1) so it never changes
+    // behavior unless enabled; when on, authoring ops reuse a warm process and fall back to
+    // spawn-per-op on any resident failure.
+    if (process.env.GODOT_RESIDENT === '1') {
+      this.opServer = new GodotOpServer(
+        () => this.godotPath,
+        this.operationsScriptPath,
+        (m) => this.logDebug(m),
+      );
+      if (debugMode) console.error('[DEBUG] Resident op-server ENABLED (GODOT_RESIDENT=1)');
+    }
 
     // Initialize the MCP server
     this.server = new Server(
@@ -516,6 +531,7 @@ func _bounds(root: Node) -> Rect2:
       this.activeProcess.process.kill();
       this.activeProcess = null;
     }
+    this.opServer?.killAll();
     await this.server.close();
   }
 
@@ -1376,7 +1392,8 @@ func _bounds(root: Node) -> Rect2:
         case 'instance_scene':
           return await this.handleAuthoringOp('instance_scene', request.params.arguments, ['subScene']);
         case 'get_scene_tree':
-          return await this.handleAuthoringOp('get_scene_tree', request.params.arguments, []);
+          // returns the tree on stdout, not a TCP ack — must stay spawn-per-op
+          return await this.handleAuthoringOp('get_scene_tree', request.params.arguments, [], true, false);
         case 'add_input_action':
           return await this.handleAuthoringOp('add_input_action', request.params.arguments, ['action'], false);
         case 'set_project_setting':
@@ -2160,7 +2177,7 @@ func _bounds(root: Node) -> Rect2:
   // Generic handler for the headless AUTHORING-LAYER ops (animation, collision,
   // camera limits, signals, animated sprites, tilemaps, areas, particles). Each
   // validates the project + scene, then drives godot_operations.gd via executeOperation.
-  private async handleAuthoringOp(operation: string, args: any, required: string[], needsScene = true) {
+  private async handleAuthoringOp(operation: string, args: any, required: string[], needsScene = true, residentOk = true) {
     args = this.normalizeParameters(args);
     const need = ['projectPath', ...(needsScene ? ['scenePath'] : []), ...required];
     for (const key of need) {
@@ -2187,6 +2204,34 @@ func _bounds(root: Node) -> Rect2:
     }
     const params: any = { ...args };
     delete params.projectPath;
+
+    // Prefer the warm resident when enabled. It's a pure accelerator: on success we return;
+    // on an INFRA failure (resident died/unavailable — which also covers a handler that
+    // crashed the process BEFORE its save, so nothing persisted) we transparently fall
+    // through to spawn-per-op, which re-runs cleanly and reports the real error. A resident
+    // TIMEOUT is NOT retried (the op may have run), it's surfaced as an error.
+    if (this.opServer && residentOk && needsScene) {
+      const rr = await this.opServer
+        .call(args.projectPath, operation, params)
+        .catch((e: unknown) => ({ ok: false, error: String((e as Error)?.message ?? e), stdout: '' }));
+      if (rr.ok) {
+        return { content: [{ type: 'text', text: `${operation} completed (resident).\n${rr.stdout}`.trim() }] };
+      }
+      const err = rr.error ?? '';
+      const infraFailure = /resident died|not available|ready|become ready|process exited|no Godot|socket closed/.test(err);
+      if (!infraFailure) {
+        return this.createErrorResponse(
+          `${operation} failed: ${err || 'resident error'}`,
+          [
+            'Check the node paths (parentPath/fromPath/toPath) exist in the scene',
+            'Verify any referenced texture path is a res:// resource',
+            rr.stdout ? `Resident output:\n${rr.stdout.slice(-400)}` : '',
+          ].filter(Boolean),
+        );
+      }
+      // infra failure — fall through to the spawn-per-op path below
+    }
+
     try {
       const { stdout, stderr } = await this.executeOperation(operation, params, args.projectPath);
       if (stderr && /Failed to|not found|does not exist|has no signal/.test(stderr)) {

@@ -55,11 +55,21 @@ func _init():
         log_error("Failed to parse JSON parameters: " + params_json)
         log_error("JSON Error: " + json.get_error_message() + " at line " + str(json.get_error_line()))
         quit(1)
-    
+        return
+
+    # Resident op-server — checked BEFORE the empty-params guard (its params are legitimately
+    # {}). Stays warm and serves ops over TCP so N ops cost ONE Godot boot (no reboot per op).
+    # Blocks until the client disconnects / shuts down.
+    if operation == "__serve":
+        _serve(params if params != null else {})
+        quit()
+        return
+
     if not params:
         log_error("Failed to parse JSON parameters: " + params_json)
         quit(1)
-    
+        return
+
     log_info("Executing operation: " + operation)
 
     _dispatch(operation, params)
@@ -1330,6 +1340,92 @@ func _to_snake(s):
         else:
             r += c
     return r
+
+# Resident op-server. Opens a TCP listener on an ephemeral port, prints it (so the MCP
+# server can connect), then serves newline-delimited JSON requests { id, op, params } ->
+# { id, ok, result|error } by replaying the SAME _dispatch handlers — no reboot per op.
+# One request at a time (the TS side serializes). A handler that hits a hard error still
+# quit()s the process; the TS side detects the exit and restarts the resident.
+func _serve(params):
+    var server = TCPServer.new()
+    var err = server.listen(0)
+    if err != OK:
+        printerr("op-server: listen failed: " + str(err))
+        return
+    var port = server.get_local_port()
+    # This exact marker is how the MCP server learns the port. Keep it stable.
+    print("LEON_OP_SERVER_PORT " + str(port))
+
+    # Wait (bounded) for the MCP server to connect.
+    var peer = null
+    var waited = 0
+    while peer == null:
+        if server.is_connection_available():
+            peer = server.take_connection()
+        else:
+            OS.delay_msec(5)
+            waited += 5
+            if waited > 30000:
+                printerr("op-server: no client connected within 30s")
+                server.stop()
+                return
+    peer.set_no_delay(true)
+    print("LEON_OP_SERVER_READY")
+
+    var buf = ""
+    while true:
+        peer.poll()
+        if peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+            break
+        var avail = peer.get_available_bytes()
+        if avail > 0:
+            buf += peer.get_utf8_string(avail)
+            while buf.find("\n") != -1:
+                var idx = buf.find("\n")
+                var line = buf.substr(0, idx)
+                buf = buf.substr(idx + 1)
+                if line.strip_edges() != "":
+                    _handle_request(peer, line)
+        else:
+            OS.delay_msec(3)
+    server.stop()
+
+func _handle_request(peer, line):
+    var json = JSON.new()
+    if json.parse(line) != OK:
+        _reply(peer, {"id": null, "ok": false, "error": "bad json"})
+        return
+    var req = json.get_data()
+    if not (req is Dictionary):
+        _reply(peer, {"id": null, "ok": false, "error": "request must be an object"})
+        return
+    var id = req.get("id", null)
+    var op = str(req.get("op", ""))
+    if op == "__ping":
+        _reply(peer, {"id": id, "ok": true, "result": "pong"})
+        return
+    if op == "__shutdown":
+        _reply(peer, {"id": id, "ok": true, "result": "bye"})
+        _reply_flush(peer)
+        quit()
+        return
+    if op == "__serve" or op == "":
+        _reply(peer, {"id": id, "ok": false, "error": "invalid op"})
+        return
+    var op_params = _snakeify(req.get("params", {}))
+    # A failing handler prints the error + quit()s the process; the client then sees the
+    # socket close and treats this request as failed. On success it prints to stdout and
+    # we ack over TCP (mutating ops persist their own .tscn via _authoring_save).
+    _dispatch(op, op_params)
+    _reply(peer, {"id": id, "ok": true})
+
+func _reply(peer, obj):
+    var data = (JSON.stringify(obj) + "\n").to_utf8_buffer()
+    peer.put_data(data)
+
+func _reply_flush(peer):
+    # best-effort: make sure the reply bytes go out before we quit
+    peer.poll()
 
 func _authoring_load(params):
     # In a batch, every op shares the ONE scene loaded by batch_author — don't reload.
