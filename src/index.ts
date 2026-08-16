@@ -8,8 +8,8 @@
  */
 
 import { fileURLToPath } from 'url';
-import { join, dirname, basename, normalize } from 'path';
-import { existsSync, readdirSync, mkdirSync } from 'fs';
+import { join, dirname, basename, normalize, isAbsolute } from 'path';
+import { existsSync, readdirSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -65,6 +65,124 @@ class GodotServer {
   private server: Server;
   private activeProcess: GodotProcess | null = null;
   private godotPath: string | null = null;
+
+  /**
+   * GDScript template for capture_level_overview. Tokens (__TARGET__, __OUT__,
+   * __MAXW__, __MAXH__, __PAD__) are substituted at runtime. Instances the target
+   * scene, computes the level's world AABB, frames a fitted Camera2D, and saves one
+   * real rendered frame. Lines are flush-left on purpose — GDScript is
+   * indentation-sensitive, so no host-code indentation may leak in.
+   */
+  private static readonly CAPTURE_GD = String.raw`extends Node2D
+# Studio Leon — whole-level overview capture (auto-generated; safe to delete).
+const TARGET_SCENE := "__TARGET__"
+const OUT_PATH := "__OUT__"
+const MAX_W := __MAXW__
+const MAX_H := __MAXH__
+const PAD := __PAD__
+
+func _ready() -> void:
+    var packed = ResourceLoader.load(TARGET_SCENE)
+    if packed == null or not (packed is PackedScene):
+        push_error("LEON_CAPTURE: cannot load scene " + TARGET_SCENE)
+        get_tree().quit(2)
+        return
+    var inst = packed.instantiate()
+    add_child(inst)
+    # let the instanced scene's _ready run and tilemaps populate
+    await get_tree().process_frame
+    await get_tree().process_frame
+    var b := _bounds(inst)
+    if b.size.x <= 1.0 or b.size.y <= 1.0:
+        b = Rect2(Vector2.ZERO, Vector2(1152.0, 648.0))
+    b = b.grow(maxf(b.size.x, b.size.y) * PAD)
+    var ar := b.size.x / b.size.y
+    var ow := MAX_W
+    var oh := int(round(float(MAX_W) / ar))
+    if oh > MAX_H:
+        oh = MAX_H
+        ow = int(round(float(MAX_H) * ar))
+    ow = maxi(ow, 16)
+    oh = maxi(oh, 16)
+    DisplayServer.window_set_size(Vector2i(ow, oh))
+    var vp := get_viewport()
+    var cam := Camera2D.new()
+    add_child(cam)
+    cam.position = b.position + b.size * 0.5
+    var z: float = minf(float(ow) / b.size.x, float(oh) / b.size.y)
+    cam.zoom = Vector2(z, z)
+    cam.make_current()
+    # settle the window resize + camera, then grab exactly one drawn frame
+    for i in range(5):
+        await get_tree().process_frame
+    await RenderingServer.frame_post_draw
+    var img := vp.get_texture().get_image()
+    if img == null:
+        push_error("LEON_CAPTURE: viewport image was null")
+        get_tree().quit(4)
+        return
+    var err := img.save_png(OUT_PATH)
+    if err != OK:
+        push_error("LEON_CAPTURE: save_png failed err=" + str(err))
+        get_tree().quit(3)
+        return
+    print("LEON_CAPTURE_DONE ", OUT_PATH, " ", ow, "x", oh, " bounds=", b)
+    get_tree().quit(0)
+
+func _xf_rect(xf: Transform2D, r: Rect2) -> Rect2:
+    var p0 := xf * r.position
+    var p1 := xf * (r.position + Vector2(r.size.x, 0.0))
+    var p2 := xf * (r.position + Vector2(0.0, r.size.y))
+    var p3 := xf * (r.position + r.size)
+    var mn := Vector2(minf(minf(p0.x, p1.x), minf(p2.x, p3.x)), minf(minf(p0.y, p1.y), minf(p2.y, p3.y)))
+    var mx := Vector2(maxf(maxf(p0.x, p1.x), maxf(p2.x, p3.x)), maxf(maxf(p0.y, p1.y), maxf(p2.y, p3.y)))
+    return Rect2(mn, mx - mn)
+
+func _bounds(root: Node) -> Rect2:
+    var acc := Rect2()
+    var has := false
+    var stack: Array = [root]
+    while not stack.is_empty():
+        var n = stack.pop_back()
+        # a level overview is the world, not the HUD — skip UI overlays
+        if n is CanvasLayer:
+            continue
+        for c in n.get_children():
+            stack.push_back(c)
+        var rr := Rect2()
+        var ok := false
+        if n is Camera2D:
+            var cam := n as Camera2D
+            if cam.limit_left > -10000000 and cam.limit_right < 10000000 and cam.limit_right > cam.limit_left and cam.limit_bottom > cam.limit_top:
+                rr = Rect2(Vector2(cam.limit_left, cam.limit_top), Vector2(cam.limit_right - cam.limit_left, cam.limit_bottom - cam.limit_top))
+                ok = true
+        elif n is TileMapLayer:
+            var tl := n as TileMapLayer
+            var used := tl.get_used_rect()
+            if used.size.x > 0 and used.size.y > 0 and tl.tile_set != null:
+                var ts := Vector2(tl.tile_set.tile_size)
+                var local := Rect2(Vector2(used.position) * ts, Vector2(used.size) * ts)
+                rr = _xf_rect(tl.global_transform, local)
+                ok = true
+        elif n is Sprite2D:
+            var sp := n as Sprite2D
+            if sp.texture != null:
+                rr = _xf_rect(sp.global_transform, sp.get_rect())
+                ok = true
+        elif n is AnimatedSprite2D:
+            var asp := n as AnimatedSprite2D
+            var fr := asp.sprite_frames
+            if fr != null and asp.animation != "" and fr.get_frame_count(asp.animation) > 0:
+                var tex := fr.get_frame_texture(asp.animation, asp.frame)
+                if tex != null:
+                    var sz := tex.get_size()
+                    rr = _xf_rect(asp.global_transform, Rect2(-sz * 0.5, sz))
+                    ok = true
+        if ok:
+            acc = rr if not has else acc.merge(rr)
+            has = true
+    return acc if has else Rect2()
+`;
   private operationsScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
   private strictPathValidation: boolean = false;
@@ -700,6 +818,23 @@ class GodotServer {
           },
         },
         {
+          name: 'capture_level_overview',
+          description:
+            "Render a whole-LEVEL overview PNG of a scene — the top-down \"level-designer's view\" of the entire level (all tilemaps/sprites framed to fit), NOT the in-game camera. Computes the level's world bounds (Camera2D limits if authored, else the union of TileMapLayer/Sprite2D extents), frames an orthographic camera to fit, and captures one real (non-headless) rendered frame. Use it to eyeball level layout, coverage, and composition the way you would in the Godot editor.",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string', description: 'Path to the Godot project directory' },
+              scene: { type: 'string', description: 'Scene to capture — a res:// path or project-relative .tscn (e.g. "res://levels/level1.tscn")' },
+              outputPath: { type: 'string', description: 'Where to write the PNG (absolute, or relative to the project). Default: <project>/.studio/shots/level-overview.png' },
+              maxWidth: { type: 'number', description: 'Max output width in px (default 1920). The level aspect is preserved within maxWidth×maxHeight.' },
+              maxHeight: { type: 'number', description: 'Max output height in px (default 1080).' },
+              padding: { type: 'number', description: 'Fractional margin around the level bounds, 0–0.5 (default 0.06).' },
+            },
+            required: ['projectPath', 'scene'],
+          },
+        },
+        {
           name: 'get_debug_output',
           description: 'Get the current debug output and errors',
           inputSchema: {
@@ -1176,6 +1311,8 @@ class GodotServer {
           return await this.handleLaunchEditor(request.params.arguments);
         case 'run_project':
           return await this.handleRunProject(request.params.arguments);
+        case 'capture_level_overview':
+          return await this.handleCaptureLevelOverview(request.params.arguments);
         case 'get_debug_output':
           return await this.handleGetDebugOutput();
         case 'stop_project':
@@ -1426,6 +1563,153 @@ class GodotServer {
           'Verify the project path is accessible',
         ]
       );
+    }
+  }
+
+  /**
+   * Handle the capture_level_overview tool — render the WHOLE level (the
+   * "level-designer's view"), not the in-game camera. We generate a tiny throwaway
+   * capture scene into the project that: instances the target scene, computes the
+   * level's world AABB (authored Camera2D limits if present, else the union of
+   * TileMapLayer/Sprite2D extents), frames an orthographic Camera2D to fit, and grabs
+   * exactly one REAL (non-headless) rendered frame to a PNG. Headless is useless here —
+   * the dummy renderer produces blank frames — so this runs with the real renderer,
+   * same as run_project. Temp files are cleaned up afterwards.
+   */
+  private async handleCaptureLevelOverview(args: any) {
+    if (!args || !args.projectPath) {
+      return this.createErrorResponse('Project path is required', ['Provide a valid path to a Godot project directory']);
+    }
+    if (!this.validatePath(args.projectPath)) {
+      return this.createErrorResponse('Invalid project path', ['Provide a valid path without ".." or other potentially unsafe characters']);
+    }
+    if (!args.scene) {
+      return this.createErrorResponse('scene is required', ['Provide the .tscn to capture, e.g. "res://levels/level1.tscn"']);
+    }
+    const projectFile = join(args.projectPath, 'project.godot');
+    if (!existsSync(projectFile)) {
+      return this.createErrorResponse(`Not a valid Godot project: ${args.projectPath}`, [
+        'Ensure the path points to a directory containing a project.godot file',
+      ]);
+    }
+
+    if (!this.godotPath) {
+      await this.detectGodotPath();
+      if (!this.godotPath) {
+        return this.createErrorResponse('Could not find a Godot executable', ['Set GODOT_PATH to your Godot binary']);
+      }
+    }
+
+    // Normalise the scene to a res:// path.
+    let resScene: string = String(args.scene);
+    if (!resScene.startsWith('res://')) resScene = 'res://' + resScene.replace(/^\/+/, '');
+
+    // Output PNG — default into the studio shot convention.
+    let outPath: string = args.outputPath ? String(args.outputPath) : join(args.projectPath, '.studio', 'shots', 'level-overview.png');
+    if (!isAbsolute(outPath)) outPath = join(args.projectPath, outPath);
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+    } catch {}
+
+    const maxW = Math.min(Math.max(parseInt(String(args.maxWidth ?? 1920), 10) || 1920, 128), 4096);
+    const maxH = Math.min(Math.max(parseInt(String(args.maxHeight ?? 1080), 10) || 1080, 128), 4096);
+    const pad = Math.min(Math.max(Number(args.padding ?? 0.06) || 0.06, 0), 0.5);
+
+    // Throwaway capture scene + script written into the project (so res:// resolves).
+    const stamp = Date.now().toString(36);
+    const gdName = `__leon_capture_${stamp}.gd`;
+    const tscnName = `__leon_capture_${stamp}.tscn`;
+    const gdAbs = join(args.projectPath, gdName);
+    const tscnAbs = join(args.projectPath, tscnName);
+    const gdSource = GodotServer.CAPTURE_GD
+      .replace(/__TARGET__/g, resScene)
+      .replace(/__OUT__/g, outPath.replace(/\\/g, '/'))
+      .replace(/__MAXW__/g, String(maxW))
+      .replace(/__MAXH__/g, String(maxH))
+      .replace(/__PAD__/g, String(pad));
+    const tscnSource =
+      `[gd_scene load_steps=2 format=3]\n\n` +
+      `[ext_resource type="Script" path="res://${gdName}" id="1_cap"]\n\n` +
+      `[node name="LeonCapture" type="Node2D"]\n` +
+      `script = ExtResource("1_cap")\n`;
+
+    const cleanup = () => {
+      for (const f of [gdAbs, tscnAbs, `${gdAbs}.uid`, `${tscnAbs}.uid`, `${gdAbs}.import`, `${tscnAbs}.import`]) {
+        try { unlinkSync(f); } catch {}
+      }
+    };
+
+    try {
+      writeFileSync(gdAbs, gdSource, 'utf8');
+      writeFileSync(tscnAbs, tscnSource, 'utf8');
+
+      // Kill any of OUR older capture/run before spawning (avoid piling up windows).
+      if (this.activeProcess) {
+        try { this.activeProcess.process.kill(); } catch {}
+        this.activeProcess = null;
+      }
+
+      const px = 40 + Math.floor(Math.random() * 400);
+      const py = 40 + Math.floor(Math.random() * 200);
+      const cmdArgs = ['-d', '--path', args.projectPath, '--audio-driver', 'Dummy', '--position', `${px},${py}`, `res://${tscnName}`];
+      this.logDebug(`Capturing level overview: ${resScene} -> ${outPath}`);
+
+      const result = await new Promise<{ code: number | null; out: string; err: string; timedOut: boolean }>((resolve) => {
+        const proc = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe' });
+        let out = '';
+        let err = '';
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          try { proc.kill('SIGKILL'); } catch {}
+        }, 60000);
+        proc.stdout?.on('data', (d: Buffer) => { out += d.toString(); });
+        proc.stderr?.on('data', (d: Buffer) => { err += d.toString(); });
+        proc.on('exit', (code: number | null) => { clearTimeout(timer); resolve({ code, out, err, timedOut }); });
+        proc.on('error', (e: Error) => { clearTimeout(timer); resolve({ code: -1, out, err: `${err}\n${e.message}`, timedOut }); });
+      });
+
+      const produced = existsSync(outPath);
+      const doneLine = (result.out.split('\n').find((l) => l.includes('LEON_CAPTURE_DONE')) || '').trim();
+
+      if (!produced) {
+        const tail = (result.err || result.out).split('\n').filter(Boolean).slice(-12).join('\n');
+        return this.createErrorResponse(
+          `Level overview capture produced no PNG${result.timedOut ? ' (timed out after 60s)' : ` (exit ${result.code})`}`,
+          [
+            'Confirm the scene path is correct and the scene loads standalone',
+            'The scene needs some visible TileMapLayer/Sprite2D content (or a Camera2D with limits) to frame',
+            'A real display/renderer is required — headless produces blank frames',
+            tail ? `Godot said:\n${tail}` : 'No output captured from Godot',
+          ]
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                savedTo: outPath,
+                scene: resScene,
+                detail: doneLine || `captured (exit ${result.code})`,
+                note: 'Whole-level overview (level-designer view), not the in-game camera. Read the PNG and judge it like an art director.',
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      return this.createErrorResponse(`Failed to capture level overview: ${msg}`, [
+        'Ensure Godot is installed and GODOT_PATH is correct',
+        'Verify the project path and scene are accessible',
+      ]);
+    } finally {
+      cleanup();
     }
   }
 
